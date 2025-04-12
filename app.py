@@ -1,35 +1,51 @@
 import re
+import streamlit as st
 import PyPDF2
+import pandas as pd
+from io import BytesIO
 
-def extract_ocorrencia_data_from_pdf(pdf_path):
-    """
-    Extrai informações padronizadas de um arquivo PDF de Registro de Ocorrência.
-
-    Args:
-        pdf_path (str): O caminho para o arquivo PDF.
-
-    Returns:
-        dict: Um dicionário contendo as informações extraídas.
-    """
-    text = extract_text_from_pdf(pdf_path)
-    return extract_ocorrencia_data_from_text(text)
-
-def extract_text_from_pdf(pdf_path):
+def extract_text_from_pdf(pdf_file):
     """
     Extrai o texto de um arquivo PDF.
 
     Args:
-        pdf_path (str): O caminho para o arquivo PDF.
+        pdf_file: O arquivo PDF em bytes.
 
     Returns:
         str: O texto extraído do PDF.
     """
     text = ""
-    with open(pdf_path, "rb") as pdf_file:
-        reader = PyPDF2.PdfReader(pdf_file)
-        for page in reader.pages:
-            text += page.extract_text() or ""  # Extract text, handle None
+    pdf_reader = PyPDF2.PdfReader(pdf_file)
+    for page in pdf_reader.pages:
+        text += page.extract_text() or ""  # Extract text, handle None
     return text
+
+def extract_dinamica_fato(text):
+    # Encontrar todas as ocorrências de "QUE" que indicam declarações
+    partes_texto = text.split('\n')
+    inicio_dinamica = False
+    final_dinamica = False
+    linhas_dinamica = []
+    
+    for linha in partes_texto:
+        # Verificar se chegamos ao início da dinâmica
+        if "Dinâmica do Fato" in linha:
+            inicio_dinamica = True
+            continue
+        
+        # Verificar se chegamos ao final da dinâmica
+        if inicio_dinamica and "QUE MANIFESTA O DESEJO DE REPRESENTAR CRIMINALMENTE" in linha:
+            linhas_dinamica.append(linha)
+            final_dinamica = True
+            break
+        
+        # Se estamos na seção de dinâmica, adicionar a linha
+        if inicio_dinamica and not final_dinamica:
+            # Ignorar linhas que parecem ser cabeçalhos/rodapés
+            if not any(x in linha for x in ["Data/Impressão:", "Protocolo nº:", "REGISTRO DE OCORRÊNCIA"]):
+                linhas_dinamica.append(linha)
+    
+    return " ".join(linhas_dinamica) if linhas_dinamica else None
 
 def extract_ocorrencia_data_from_text(text):
     """
@@ -45,7 +61,7 @@ def extract_ocorrencia_data_from_text(text):
 
     # 1. Informações Administrativas
     ocorrencia_data["delegacia"] = re.search(r"(\d+a\.Delegacia de Polícia)", text, re.IGNORECASE)
-    ocorrencia_data["numero_registro"] = re.search(r"Nº\s+(\d{3}-\d{5}/\d{4})", text)
+    ocorrencia_data["numero_registro"] = re.search(r"[Nn][º°\.]?\s*(\d{3}-\d{5}/\d{4})", text)
     ocorrencia_data["data_hora_registro_inicio"] = re.search(r"Data/Hora Início do Registro: (\d{2}/\d{2}/\d{4} \d{2}:\d{2})", text)
     ocorrencia_data["data_hora_registro_final"] = re.search(r"Final do Registro: (\d{2}/\d{2}/\d{4} \d{2}:\d{2})", text)
     ocorrencia_data["origem"] = re.search(r"Origem: (.*?)\.", text)
@@ -70,7 +86,10 @@ def extract_ocorrencia_data_from_text(text):
     ocorrencia_data["autor"] = extract_envolvido(text, "Autor")
 
     # 4. Narrativa do Fato
-    ocorrencia_data["dinamica_fato"] = re.search(r"Dinâmica do Fato\s*(.*?)\s*QUE a declarante", text, re.DOTALL)
+    # ocorrencia_data["dinamica_fato"] = re.search(r"Dinâmica do Fato\s*(.*?)\s*QUE a declarante", text, re.DOTALL)
+    ocorrencia_data["dinamica_fato"] = re.search(r"Dinâmica do Fato\s*(.*?)(?:Data/Impressão:|$)", text, re.DOTALL)
+    # dinamica = extract_dinamica_fato(text)
+    # ocorrencia_data["dinamica_fato"] = dinamica
 
     # 5. Manifestação da Vítima
     ocorrencia_data["desejo_representar"] = re.search(r"QUE MANIFESTA O DESEJO DE REPRESENTAR CRIMINALMENTE CONTRA OS AUTORES DO FATO\.", text)
@@ -117,7 +136,7 @@ def extract_envolvido(text, tipo_envolvido):
     # Extrair campos individualmente
     fields = {
         "nome": r"Nome: (.*?)(?:\s*-|\n)",
-        "cpf": r"CPF/CIC N° ([\d\.\-]+)",
+        "cpf": r"CPF/CIC\s+N[°º]\s*(\d{3}\.?\d{3}\.?\d{3}-?\d{2})",
         "endereco": r"Residente na (.*?)(?:\s*Bairro:|\n)",
         "bairro": r"Bairro: (.*?)(?:\s*Municipio:|\n)",
         "municipio": r"Municipio: (.*?)(?:-|\n)",
@@ -139,25 +158,129 @@ def extract_envolvido(text, tipo_envolvido):
     
     return envolvido_data
 
-# Exemplo de uso
+# Interface Streamlit
+def main():
+    st.set_page_config(
+        page_title="Extrator de Dados de Registro de Ocorrência",
+        page_icon="🔍",
+        layout="wide"
+    )
+    
+    st.title("Extrator de Dados de Registro de Ocorrência")
+    st.write("""
+    Esta aplicação extrai informações padronizadas de um arquivo PDF de Registro de Ocorrência.
+    Faça o upload do arquivo PDF para visualizar os dados extraídos.
+    """)
+    
+    # Upload do arquivo PDF
+    uploaded_file = st.file_uploader("Escolha um arquivo PDF de Registro de Ocorrência", type="pdf")
+    
+    if uploaded_file is not None:
+        st.success("Arquivo carregado com sucesso!")
+        
+        # Botão para iniciar a extração
+        if st.button("Extrair Informações"):
+            with st.spinner("Extraindo informações..."):
+                # Extrair texto do PDF
+                text = extract_text_from_pdf(uploaded_file)
+                
+                # Opção para visualizar o texto bruto extraído
+                with st.expander("Ver texto extraído do PDF"):
+                    st.text_area("Texto extraído:", text, height=200)
+                
+                # Extrair informações do texto
+                data = extract_ocorrencia_data_from_text(text)
+                
+                # Mostrar as informações extraídas
+                st.header("Informações Extraídas")
+                
+                # Dividir a tela em três colunas
+                col1, col2 = st.columns(2)
+                
+                with col1:
+                    st.subheader("Informações Administrativas")
+                    admin_data = {k: v for k, v in data.items() if k not in ["vitima", "autor", "dinamica_fato", "desejo_representar"]}
+                    admin_df = pd.DataFrame(list(admin_data.items()), columns=["Campo", "Valor"])
+                    st.dataframe(admin_df, use_container_width=True)
+                
+                with col2:
+                    st.subheader("Detalhes da Ocorrência")
+                    st.markdown(f"**Dinâmica do Fato:** {data['dinamica_fato'] or 'Não encontrado'}")
+                    st.markdown(f"**Desejo de Representar:** {'Sim' if data['desejo_representar'] else 'Não'}")
+                
+                # Informações da Vítima e Autor
+                if data["vitima"]:
+                    st.subheader("Dados da Vítima")
+                    vitima_df = pd.DataFrame(list(data["vitima"].items()), columns=["Campo", "Valor"])
+                    st.dataframe(vitima_df, use_container_width=True)
+                else:
+                    st.info("Não foram encontrados dados da vítima.")
+                
+                if data["autor"]:
+                    st.subheader("Dados do Autor")
+                    autor_df = pd.DataFrame(list(data["autor"].items()), columns=["Campo", "Valor"])
+                    st.dataframe(autor_df, use_container_width=True)
+                else:
+                    st.info("Não foram encontrados dados do autor.")
+                
+                # Opção para exportar dados
+                st.header("Exportar Dados")
+                
+                # Converter dados para formato exportável
+                export_data = {}
+                for k, v in data.items():
+                    if k not in ["vitima", "autor"]:
+                        export_data[k] = v
+                
+                # Adicionar dados da vítima com prefixo
+                if data["vitima"]:
+                    for k, v in data["vitima"].items():
+                        export_data[f"vitima_{k}"] = v
+                
+                # Adicionar dados do autor com prefixo
+                if data["autor"]:
+                    for k, v in data["autor"].items():
+                        export_data[f"autor_{k}"] = v
+                
+                # Opções de exportação
+                export_format = st.selectbox(
+                    "Selecione o formato de exportação:",
+                    ["CSV", "JSON", "Excel"]
+                )
+                
+                if st.button("Exportar Dados"):
+                    if export_format == "CSV":
+                        # Exportar como CSV
+                        df = pd.DataFrame(list(export_data.items()), columns=["Campo", "Valor"])
+                        csv = df.to_csv(index=False).encode('utf-8')
+                        st.download_button(
+                            label="Download CSV",
+                            data=csv,
+                            file_name=f"ocorrencia_{data.get('numero_registro', 'sem_numero')}.csv",
+                            mime="text/csv",
+                        )
+                    elif export_format == "JSON":
+                        # Exportar como JSON
+                        json_str = pd.DataFrame([export_data]).to_json(orient="records")
+                        st.download_button(
+                            label="Download JSON",
+                            data=json_str,
+                            file_name=f"ocorrencia_{data.get('numero_registro', 'sem_numero')}.json",
+                            mime="application/json",
+                        )
+                    elif export_format == "Excel":
+                        # Exportar como Excel
+                        df = pd.DataFrame(list(export_data.items()), columns=["Campo", "Valor"])
+                        output = BytesIO()
+                        with pd.ExcelWriter(output, engine='xlsxwriter') as writer:
+                            df.to_excel(writer, sheet_name='Dados', index=False)
+                        excel_data = output.getvalue()
+                        st.download_button(
+                            label="Download Excel",
+                            data=excel_data,
+                            file_name=f"ocorrencia_{data.get('numero_registro', 'sem_numero')}.xlsx",
+                            mime="application/vnd.ms-excel",
+                        )
+
 if __name__ == "__main__":
-    pdf_path = "documentos/registro_ocorrencia.pdf"  # Substitua pelo caminho do seu arquivo PDF
-    data = extract_ocorrencia_data_from_pdf(pdf_path)
-    
-    # Imprime cada dado em uma linha separada
-    print("\n===== DADOS DA OCORRÊNCIA =====")
-    for key, value in data.items():
-        if key not in ["vitima", "autor"]:  # Trataremos esses separadamente
-            print(f"{key}: {value}")
-    
-    # Imprime dados da vítima, se houver
-    if data["vitima"]:
-        print("\n===== DADOS DA VÍTIMA =====")
-        for key, value in data["vitima"].items():
-            print(f"vitima_{key}: {value}")
-    
-    # Imprime dados do autor, se houver
-    if data["autor"]:
-        print("\n===== DADOS DO AUTOR =====")
-        for key, value in data["autor"].items():
-            print(f"autor_{key}: {value}")
+    main()
